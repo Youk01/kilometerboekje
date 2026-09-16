@@ -460,12 +460,34 @@
   .day ul { list-style: none; margin: 0; padding: 0; }
   .trip {
     display: grid;
-    grid-template-columns: 1fr auto auto;
+    grid-template-columns: 1fr auto auto auto;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     padding: 9px 0;
     border-bottom: 1px solid var(--line);
   }
+  .trip-share {
+    appearance: none;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--ink-3);
+    border-radius: 50%;
+    width: 28px;
+    height: 28px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    flex: none;
+  }
+  .trip-share:hover { border-color: var(--accent); color: var(--accent); }
+  .trip-share[aria-pressed="true"] {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .trip.is-shared .trip-km { color: var(--ink-3); }
   .day ul li:last-child { border-bottom: 0; }
   .trip-name { font-size: 15px; overflow-wrap: anywhere; }
   .trip-km {
@@ -678,14 +700,21 @@
     z-index: 20;
     background: var(--panel);
     color: var(--panel-ink);
-    border-radius: 999px;
-    padding: 9px 10px 9px 18px;
+    border-radius: 16px;
+    padding: 12px 14px;
     display: flex;
-    align-items: center;
-    gap: 12px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 9px;
     font-size: 14px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
-    max-width: calc(100vw - 32px);
+    width: min(380px, calc(100vw - 32px));
+  }
+  .toast-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    flex-wrap: wrap;
   }
   .toast button {
     appearance: none;
@@ -724,7 +753,7 @@
     </div>
     <div class="panel-bottom">
       <div><span class="mini-label">Ritten</span><span class="mini-value" id="tripCount">0</span></div>
-      <div><span class="mini-label">Bedrag</span><span class="mini-value money" id="amount">&euro; 0,00</span></div>
+      <div><span class="mini-label" id="amountLabel">Bedrag</span><span class="mini-value money" id="amount">&euro; 0,00</span></div>
     </div>
   </section>
 
@@ -768,6 +797,7 @@
   <!-- ============ RITTEN ============ -->
   <section class="stack" id="view-trips" role="tabpanel" aria-labelledby="tab-trips" hidden>
     <p class="section-label" id="tripsLabel">Ritten</p>
+    <p class="hint">Tik &frac12; aan bij een rit die jullie samen deelden. Dan telt maar de helft van het bedrag mee.</p>
     <ol class="days" id="tripList"></ol>
     <button class="btn quiet" type="button" id="shareBtn">Stand delen</button>
     <button class="btn quiet" type="button" id="csvBtn">Kopieer als tabel (Excel)</button>
@@ -858,7 +888,10 @@
 
 <div class="toast" id="toast" hidden>
   <span id="toastText"></span>
-  <button type="button" id="toastAction">Ongedaan maken</button>
+  <div class="toast-actions" id="toastActions">
+    <button type="button" id="toastShare">Gedeeld &frac12;</button>
+    <button type="button" id="toastAction">Ongedaan maken</button>
+  </div>
 </div>
 
 <script>
@@ -913,6 +946,7 @@
   var activeTab = "log";
   var toastTimer = null;
   var undoFn = null;
+  var shareId_ = null;
   var resetArmed = false;
 
   function seed() {
@@ -976,7 +1010,7 @@
       rate: state.rate,
       r: state.routes.map(function (r) { return [r.id, r.name, r.km]; }),
       t: state.trips.filter(function (t) { return !t.demo && t.date >= cutoff; })
-        .map(function (t) { return [t.id, t.date, t.km, t.name]; })
+        .map(function (t) { return [t.id, t.date, t.km, t.name, shareOf(t)]; })
     };
     return PREFIX + b64encode(JSON.stringify(payload));
   }
@@ -996,7 +1030,10 @@
     });
     data.t.forEach(function (t) {
       if (!haveTrips[t[0]]) {
-        state.trips.push({ id: t[0], date: t[1], km: Number(t[2]) || 0, name: t[3] || "Rit", routeId: null });
+        var nw = { id: t[0], date: t[1], km: Number(t[2]) || 0, name: t[3] || "Rit", routeId: null };
+        var sh = Number(t[4]);
+        if (isFinite(sh) && sh > 0 && sh < 1) nw.share = sh;
+        state.trips.push(nw);
         addedT++;
       }
     });
@@ -1011,6 +1048,17 @@
   }
   function sumKm(list) {
     return list.reduce(function (s, t) { return s + (Number(t.km) || 0); }, 0);
+  }
+  // aandeel dat zij betaalt: 1 = hele rit, 0.5 = gedeelde rit
+  function shareOf(t) {
+    var s = Number(t.share);
+    return (isFinite(s) && s > 0 && s <= 1) ? s : 1;
+  }
+  function sumEur(list) {
+    return list.reduce(function (s, t) { return s + (Number(t.km) || 0) * state.rate * shareOf(t); }, 0);
+  }
+  function countShared(list) {
+    return list.filter(function (t) { return shareOf(t) < 1; }).length;
   }
 
   // ---------- rendering ----------
@@ -1032,8 +1080,10 @@
       return ch === "," ? '<span class="odo-sep">,</span>' : '<span class="odo-digit">' + esc(ch) + "</span>";
     }).join("");
     el.odo.setAttribute("aria-label", s + " kilometer in " + monthLabel(curMonth));
-    el.tripCount.textContent = String(list.length);
-    el.amount.textContent = fmtEur(km * state.rate);
+    var gedeeld = countShared(list);
+    el.tripCount.textContent = gedeeld ? list.length + " · " + gedeeld + " gedeeld" : String(list.length);
+    document.getElementById("amountLabel").textContent = gedeeld ? "Jouw deel" : "Bedrag";
+    el.amount.textContent = fmtEur(sumEur(list));
     el.nextMonth.disabled = curMonth >= monthOf(todayISO());
     var earliest = state.trips.reduce(function (m, t) { return !m || t.date < m ? t.date : m; }, null);
     el.prevMonth.disabled = !!earliest && curMonth <= monthOf(earliest);
@@ -1068,8 +1118,12 @@
     });
     el.tripList.innerHTML = order.map(function (d) {
       var rows = byDay[d].map(function (t) {
-        return '<li class="trip"><span class="trip-name">' + esc(t.name) + "</span>" +
+        var gedeeld = shareOf(t) < 1;
+        return '<li class="trip' + (gedeeld ? " is-shared" : "") + '"><span class="trip-name">' + esc(t.name) + "</span>" +
           '<span class="trip-km">' + fmtKm(t.km) + " km</span>" +
+          '<button class="trip-share" type="button" data-share="' + esc(t.id) + '" aria-pressed="' + (gedeeld ? "true" : "false") +
+          '" title="' + (gedeeld ? "Gedeelde rit: je betaalt de helft" : "Markeer als gedeelde rit") +
+          '" aria-label="Gedeelde rit, ' + esc(t.name) + '">&frac12;</button>' +
           '<button class="trip-del" type="button" data-del="' + esc(t.id) + '" aria-label="Rit ' + esc(t.name) + " van " + esc(d) + ' verwijderen">&times;</button></li>';
       }).join("");
       return '<li class="day"><div class="day-head"><span class="day-date">' + esc(dfDay.format(dateFromISO(d))) +
@@ -1113,7 +1167,7 @@
     var totals = {};
     all.forEach(function (m) {
       var list = tripsIn(m);
-      totals[m] = { km: sumKm(list), n: list.length };
+      totals[m] = { km: sumKm(list), n: list.length, eur: sumEur(list), gedeeld: countShared(list) };
     });
 
     // staafdiagram: laatste 12 maanden, ook de lege ertussen
@@ -1144,14 +1198,14 @@
       return '<li><button class="month-row" type="button" data-month="' + m + '" aria-current="' + (m === curMonth ? "true" : "false") + '">' +
         '<span class="m-name">' + esc(monthLabel(m)) + "</span>" +
         '<span class="m-km">' + fmtKm(t.km) + " km</span>" +
-        '<span class="m-sub">' + t.n + (t.n === 1 ? " rit" : " ritten") + "</span>" +
-        '<span class="m-eur">' + fmtEur(t.km * state.rate) + "</span>" +
+        '<span class="m-sub">' + t.n + (t.n === 1 ? " rit" : " ritten") + (t.gedeeld ? ", " + t.gedeeld + " gedeeld" : "") + "</span>" +
+        '<span class="m-eur">' + fmtEur(t.eur) + "</span>" +
         "</button></li>";
     }).join("");
 
     var grandKm = sumKm(state.trips);
     el.grandLabel.textContent = "Alles bij elkaar · " + state.trips.length + (state.trips.length === 1 ? " rit" : " ritten");
-    el.grandValue.textContent = fmtKm(grandKm) + " km · " + fmtEur(grandKm * state.rate);
+    el.grandValue.textContent = fmtKm(grandKm) + " km · " + fmtEur(sumEur(state.trips));
 
     // verdeling per route in de gekozen maand
     var list = tripsIn(curMonth);
@@ -1188,13 +1242,16 @@
   }
 
   // ---------- toast ----------
-  function toast(text, undo) {
+  function toast(text, undo, shareId) {
     el.toastText.textContent = text;
     undoFn = undo || null;
+    shareId_ = shareId || null;
     el.toastAction.hidden = !undo;
+    document.getElementById("toastShare").hidden = !shareId;
+    document.getElementById("toastActions").hidden = !undo && !shareId;
     el.toast.hidden = false;
     if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { el.toast.hidden = true; undoFn = null; }, 5000);
+    toastTimer = setTimeout(function () { el.toast.hidden = true; undoFn = null; shareId_ = null; }, 7000);
   }
   el.toastAction.addEventListener("click", function () {
     if (undoFn) undoFn();
@@ -1202,6 +1259,22 @@
     el.toast.hidden = true;
     render();
   });
+  document.getElementById("toastShare").addEventListener("click", function () {
+    if (shareId_) setShared(shareId_, true);
+    shareId_ = null;
+    el.toast.hidden = true;
+  });
+
+  function setShared(tripId, shared) {
+    var t = state.trips.filter(function (x) { return x.id === tripId; })[0];
+    if (!t) return;
+    if (shared) t.share = 0.5; else delete t.share;
+    save();
+    render();
+    toast(shared
+      ? "Gedeelde rit · jij betaalt de helft"
+      : "Weer een hele rit voor jou");
+  }
 
   // ---------- actions ----------
   function addTrip(trip) {
@@ -1212,7 +1285,7 @@
     toast(trip.name + " · " + fmtKm(trip.km) + " km erbij", function () {
       state.trips = state.trips.filter(function (t) { return t.id !== trip.id; });
       save();
-    });
+    }, trip.id);
   }
 
   el.routeGrid.addEventListener("click", function (e) {
@@ -1224,6 +1297,11 @@
   });
 
   el.tripList.addEventListener("click", function (e) {
+    var sh = e.target.closest("[data-share]");
+    if (sh) {
+      setShared(sh.getAttribute("data-share"), sh.getAttribute("aria-pressed") !== "true");
+      return;
+    }
     var btn = e.target.closest("[data-del]");
     if (!btn) return;
     var tid = btn.getAttribute("data-del");
@@ -1363,20 +1441,22 @@
   document.getElementById("shareBtn").addEventListener("click", function () {
     var list = tripsIn(curMonth);
     var km = sumKm(list);
+    var gedeeld = countShared(list);
     var text = "Kilometers " + monthLabel(curMonth) + "\n" +
-      fmtKm(km) + " km · " + fmtEur(km * state.rate) + " · " + list.length + " ritten\n\n" +
+      fmtKm(km) + " km · " + fmtEur(sumEur(list)) + " · " + list.length + " ritten" +
+      (gedeeld ? " (" + gedeeld + " gedeeld, half gerekend)" : "") + "\n\n" +
       "Synccode (plakken in het Kilometerboekje bij Instellingen):\n" + makeCode();
     offerCopy(text, "Dit berichtje staat op je klembord. Stuur het door.");
   });
 
   document.getElementById("csvBtn").addEventListener("click", function () {
     var list = tripsIn(curMonth).slice().reverse();
-    var rows = ["Datum;Route;Kilometers;Bedrag"];
+    var rows = ["Datum;Route;Kilometers;Gedeeld;Bedrag"];
     list.forEach(function (t) {
-      rows.push(t.date + ";" + t.name.replace(/;/g, ",") + ";" + fmtKm(t.km) + ";" + fmtEur(t.km * state.rate));
+      rows.push(t.date + ";" + t.name.replace(/;/g, ",") + ";" + fmtKm(t.km) + ";" +
+        (shareOf(t) < 1 ? "ja" : "nee") + ";" + fmtEur(t.km * state.rate * shareOf(t)));
     });
-    var km = sumKm(list);
-    rows.push("Totaal;;" + fmtKm(km) + ";" + fmtEur(km * state.rate));
+    rows.push("Totaal;;" + fmtKm(sumKm(list)) + ";;" + fmtEur(sumEur(list)));
     offerCopy(rows.join("\n"), "Plak dit in Excel of Numbers.");
   });
 
